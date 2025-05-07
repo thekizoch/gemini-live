@@ -1,0 +1,60 @@
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 20px;
+    background-color: #f4f7f6;
+    color: #333;
+    line-height: 1.6;
+}
+
+h1, h2 {
+    color: #2c3e50;
+}
+
+#sessionButton {
+    padding: 12px 20px;
+    font-size: 16px;
+    cursor: pointer;
+    background-color: #27ae60;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    margin-bottom: 20px;
+    transition: background-color 0.3s ease;
+}
+
+#sessionButton:hover {
+    background-color: #229954;
+}
+
+#sessionButton.recording {
+    background-color: #c0392b;
+}
+
+#sessionButton.recording:hover {
+    background-color: #a93226;
+}
+
+
+#status {
+    margin-bottom: 20px;
+    padding: 10px 15px;
+    background-color: #eaf2f8;
+    border-left: 5px solid #3498db;
+    border-radius: 4px;
+}
+
+#transcriptContainer {
+    background-color: white;
+    border: 1px solid #dcdcdc;
+    border-radius: 5px;
+    padding: 15px;
+    min-height: 200px;
+    max-height: 400px; /* Or your preferred max height */
+    overflow-y: auto; /* Enables scrolling for overflow */
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+#transcript {
+    white-space: pre-wrap; /* Preserve line breaks and spaces */
+    word-wrap: break-word; /* Break long words to prevent horizontal scroll */
+}

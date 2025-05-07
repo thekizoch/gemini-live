@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: dev-sandbox
+Version: 0.1.0
+Summary: Transcription demo
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: websockets
+Requires-Dist: sounddevice
+Requires-Dist: numpy
+Requires-Dist: python-dotenv
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: ruff>=0.11.8
+Requires-Dist: google-genai
+
+# HCRIS PoC - Quick Run
+
+# Assumes .venv is activated, dependencies installed (uv pip install -e .), and .env file with GOOGLE_GENAI_API_KEY is present for the backend.
+
+# 1. Start Backend API (in a terminal):
+# uvicorn api:app --host localhost --port 8765
+
+# 2. Open Patient App:
+# Open the `index.html` file in your web browser.

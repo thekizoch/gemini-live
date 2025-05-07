@@ -1,0 +1,8 @@
+.ruff_cache/
+.venv
+.env
+.cursor
+
+__pycache__
+
+repomix-output.xml

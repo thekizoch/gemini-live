@@ -1,0 +1,24 @@
+[project]
+name = "dev-sandbox"
+version = "0.1.0"
+description = "Transcription demo"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "websockets",
+    "sounddevice",
+    "numpy",
+    "python-dotenv",
+    "fastapi",
+    "uvicorn[standard]",
+    "ruff>=0.11.8",
+    "google-genai",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["./"]  # Look in the current directory
+include = ["api*"] # Include 'api.py' (and potentially 'api' if it were a package)
