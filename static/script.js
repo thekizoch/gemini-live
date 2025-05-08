@@ -19,6 +19,10 @@ let isPlayingModelAudio = false;
 let nextModelAudioStartTime = 0;
 const MODEL_AUDIO_SAMPLE_RATE = 24000; // Gemini Live API audio output is 24kHz
 
+// MODIFICATION: For smarter transcript display
+let currentSpeaker = null; // null, 'user', or 'model'
+let currentSpeakerSpan = null;
+
 function updateStatus(message, isError = false) {
     statusDiv.textContent = `Status: ${message}`;
     statusDiv.style.color = isError ? '#c0392b' : '#2c3e50'; // Red for error, dark blue for normal
@@ -29,10 +33,63 @@ function updateStatus(message, isError = false) {
     }
 }
 
-function appendTranscript(text) {
-    transcriptDiv.innerHTML += text; // Server now sends text with prefixes and newlines
+function appendTranscript(text, speaker, isFinalPart = true) {
+    console.debug("Appending transcript:", { text, speaker, isFinalPart });
+
+    if (speaker !== currentSpeaker) {
+        // If speaker changed, finalize previous line and start a new one
+        if (currentSpeakerSpan) {
+            // Add a newline if the previous line wasn't empty and wasn't just a prefix
+            if (currentSpeakerSpan.textContent.trim() !== "" && !currentSpeakerSpan.textContent.endsWith("\\n")) {
+                 // transcriptDiv.appendChild(document.createElement('br')); // Implicitly handled by new div
+            }
+        }
+        
+        const newSpeakerDiv = document.createElement('div');
+        newSpeakerDiv.classList.add('transcript-line');
+        
+        const speakerPrefix = document.createElement('span');
+        speakerPrefix.classList.add('speaker-prefix');
+        speakerPrefix.textContent = speaker === 'user' ? "You: " : "Gemini: ";
+        newSpeakerDiv.appendChild(speakerPrefix);
+
+        currentSpeakerSpan = document.createElement('span');
+        currentSpeakerSpan.classList.add('speaker-text');
+        newSpeakerDiv.appendChild(currentSpeakerSpan);
+        
+        transcriptDiv.appendChild(newSpeakerDiv);
+        currentSpeaker = speaker;
+    } else if (!currentSpeakerSpan) {
+        // This case should ideally not happen if currentSpeaker is set, but as a fallback:
+        const newSpeakerDiv = document.createElement('div');
+        newSpeakerDiv.classList.add('transcript-line');
+        const speakerPrefix = document.createElement('span');
+        speakerPrefix.classList.add('speaker-prefix');
+        speakerPrefix.textContent = speaker === 'user' ? "You: " : "Gemini: ";
+        newSpeakerDiv.appendChild(speakerPrefix);
+        currentSpeakerSpan = document.createElement('span');
+        currentSpeakerSpan.classList.add('speaker-text');
+        newSpeakerDiv.appendChild(currentSpeakerSpan);
+        transcriptDiv.appendChild(newSpeakerDiv);
+    }
+
+    // Append text to the current speaker's span
+    // The server now sends text without newlines for partials, and potentially with for finals.
+    // We handle ensuring it flows correctly.
+    currentSpeakerSpan.textContent += text;
+
+    if (isFinalPart) {
+        // If it's a final part of user's speech or any model speech,
+        // reset currentSpeaker so the next message starts a new line.
+        // Also, ensure the current span ends appropriately (e.g. if no natural newline came)
+        if (!currentSpeakerSpan.textContent.endsWith("\\n") && currentSpeakerSpan.textContent.trim() !== "") {
+            // transcriptDiv.appendChild(document.createElement('br')); // Let CSS handle line breaks between divs
+        }
+        currentSpeaker = null; 
+        currentSpeakerSpan = null;
+    }
+    
     transcriptDiv.parentElement.scrollTop = transcriptDiv.parentElement.scrollHeight; // Auto-scroll container
-    console.log("Transcript appended:", text);
 }
 
 async function startAudioCapture() {
@@ -83,7 +140,6 @@ async function startAudioCapture() {
         };
 
         microphoneSource.connect(audioProcessorNode);
-        // audioProcessorNode.connect(audioContext.destination); // Uncomment for local monitoring (beware of feedback)
 
         updateStatus("Audio capture started. Sending data...");
         console.log("Audio capture successfully started.");
@@ -183,8 +239,8 @@ function stopClientPlayback() {
         // Or, more simply, just close it. The next init will create a new one.
         clientPlaybackAudioContext.close().then(() => {
             console.log("AudioContext for model playback closed.");
+            clientPlaybackAudioContext = null; // MODIFICATION: ensure it's nullified after close
         }).catch(e => console.error("Error closing playback AudioContext", e));
-        clientPlaybackAudioContext = null;
     }
     isPlayingModelAudio = false;
     nextModelAudioStartTime = 0;
@@ -194,6 +250,8 @@ sessionButton.onclick = () => {
     if (!isSessionActive) {
         console.log("Start Session button clicked.");
         transcriptDiv.innerHTML = "";
+        currentSpeaker = null; // Reset speaker tracking
+        currentSpeakerSpan = null;
         updateStatus("Connecting to server...");
 
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
@@ -247,11 +305,12 @@ sessionButton.onclick = () => {
                 console.debug("Parsed server message:", message);
 
                 if (message.type === "model_transcript") {
-                    appendTranscript(message.data); // Already prefixed by server
+                    appendTranscript(message.data, 'model');
                 } else if (message.type === "user_transcript") {
-                    appendTranscript(message.data); // Already prefixed by server
+                    appendTranscript(message.data, 'user', message.is_final_part);
                 } else if (message.type === "transcript") { // Legacy, if server ever sends it
-                    appendTranscript("Transcript (legacy): " + message.data + "\n");
+                    // Decide how to handle legacy or mark as unknown speaker
+                    appendTranscript(message.data, 'unknown', true); 
                 } else if (message.status === "info") {
                     updateStatus(message.message);
                     if (message.message.includes("Live session started")) {
@@ -304,6 +363,8 @@ sessionButton.onclick = () => {
             stopAudioCapture(); 
             stopClientPlayback(); 
             socket = null; 
+            currentSpeaker = null; // Reset speaker tracking on close
+            currentSpeakerSpan = null;
             console.log("UI reset and socket cleared due to WebSocket close.");
         };
 
@@ -320,6 +381,8 @@ sessionButton.onclick = () => {
             stopAudioCapture(); // Ensure local audio capture is stopped
             stopClientPlayback(); // Ensure local playback is stopped
             updateStatus("Session stopped (no active connection).");
+            currentSpeaker = null; // Reset speaker tracking
+            currentSpeakerSpan = null;
             console.log("Session stopped locally (no active connection). UI reset.");
         }
         // stopAudioCapture and stopClientPlayback are also called here,

@@ -58,3 +58,18 @@ h1, h2 {
     white-space: pre-wrap; /* Preserve line breaks and spaces */
     word-wrap: break-word; /* Break long words to prevent horizontal scroll */
 }
+
+/* New styles for transcript lines and speaker prefixes */
+.transcript-line {
+    margin-bottom: 8px; /* Space between different speaker lines */
+}
+
+.speaker-prefix {
+    font-weight: bold;
+    margin-right: 5px;
+    color: #555; /* Slightly darker than general text for emphasis */
+}
+
+.speaker-text {
+    /* No specific style needed yet, inherits from transcriptDiv or body */
+}

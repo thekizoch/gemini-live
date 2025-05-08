@@ -1,8 +1,0 @@
-README.md
-api.py
-pyproject.toml
-dev_sandbox.egg-info/PKG-INFO
-dev_sandbox.egg-info/SOURCES.txt
-dev_sandbox.egg-info/dependency_links.txt
-dev_sandbox.egg-info/requires.txt
-dev_sandbox.egg-info/top_level.txt
