@@ -48,7 +48,6 @@ python Get_started_LiveAPI.py --mode screen
 import asyncio
 import base64
 import io
-import os
 import sys
 import traceback
 
@@ -62,7 +61,8 @@ import argparse
 from google import genai
 
 if sys.version_info < (3, 11, 0):
-    import taskgroup, exceptiongroup
+    import taskgroup
+    import exceptiongroup
 
     asyncio.TaskGroup = taskgroup.TaskGroup
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
