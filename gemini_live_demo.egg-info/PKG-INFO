@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: gemini-live-demo
+Version: 0.1.0
+Summary: Transcription demo
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: websockets
+Requires-Dist: sounddevice
+Requires-Dist: numpy
+Requires-Dist: python-dotenv
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: ruff>=0.11.8
+Requires-Dist: google-genai
+Requires-Dist: google-cloud-speech>=2.32.0
+
+#  Quick Run
+
+1.  Install dependencies: `uv venv` then `uv sync`
+2.  Create a `.env` file and add your `GOOGLE_GENAI_API_KEY="YOUR_API_KEY"`.
+3.  Start the backend API: `uvicorn api:app --host localhost --port 8765`.
+4.  Open the `localhost:8765` in your web browser.
