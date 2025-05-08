@@ -1,5 +1,5 @@
 [project]
-name = "dev-sandbox"
+name = "gemini-live-demo"
 version = "0.1.0"
 description = "Transcription demo"
 readme = "README.md"

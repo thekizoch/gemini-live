@@ -29,7 +29,8 @@ class LiveSessionManager:
         self.audio_queue = None
         self.session_handler_task = None
         self.websocket = None
-        self.client = genai.Client(api_key=GOOGLE_GENAI_API_KEY)
+        self.client = genai.Client(api_key=GOOGLE_GENAI_API_KEY,
+                                   http_options={"api_version": "v1beta"}) # Ensure v1beta for Live API
 
     async def start_session(self, websocket: WebSocket):
         if self.live_session_active:
@@ -47,7 +48,10 @@ class LiveSessionManager:
 
     async def _handle_session_lifecycle(self):
         model_name = "models/gemini-2.0-flash-live-001"
-        config = {"response_modalities": ["TEXT"]} 
+        config = {
+            "response_modalities": ["AUDIO"],
+            "output_audio_transcription": {},  # Request transcription of model's audio output
+        }
 
         send_audio_task = None
         receive_responses_task = None
@@ -62,7 +66,7 @@ class LiveSessionManager:
                     session_started_sent = True
 
                 send_audio_task = asyncio.create_task(self._send_audio_chunks(session))
-                receive_responses_task = asyncio.create_task(self._receive_genai_responses(session))
+                receive_responses_task = asyncio.create_task(self._receive_genai_data(session))
 
                 done, pending = await asyncio.wait(
                     {send_audio_task, receive_responses_task},
@@ -80,7 +84,7 @@ class LiveSessionManager:
                 for task in done:
                     exc = task.exception()
                     if exc:
-                        logging.error(f"Task {task.get_name()} failed with exception: {exc}")
+                        logging.error(f"Task {task.get_name()} failed with exception: {exc}", exc_info=True)
                         if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
                             await self.websocket.send_json({"type": "error", "message": f"Session error: {str(exc)}"})
                     else:
@@ -90,10 +94,11 @@ class LiveSessionManager:
             logging.info("Session lifecycle task was cancelled externally (e.g., by stop_session).")
         except Exception as e:
             logging.error(f"Error during GenAI session lifecycle: {e}", exc_info=True)
-            if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED and not session_started_sent:
-                await self.websocket.send_json({"status": "error", "message": f"Error starting session: {str(e)}"})
-            elif self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
-                await self.websocket.send_json({"status": "error", "message": f"GenAI session error: {str(e)}"})
+            if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
+                if not session_started_sent:
+                    await self.websocket.send_json({"status": "error", "message": f"Error starting session: {str(e)}"})
+                else: # Session started but then an error occurred
+                    await self.websocket.send_json({"status": "error", "message": f"GenAI session error: {str(e)}"})
         finally:
             logging.info("Cleaning up session lifecycle resources.")
             if send_audio_task and not send_audio_task.done():
@@ -105,10 +110,10 @@ class LiveSessionManager:
                 try: await receive_responses_task
                 except asyncio.CancelledError: pass
             
-            if self.live_session_active:
-                logging.info("Session lifecycle ended; ensuring full stop_session cleanup.")
-                notify = self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED
-                asyncio.create_task(self.stop_session(notify_client=notify))
+            if self.live_session_active: # If still marked active, means it didn't stop cleanly via stop_session
+                logging.info("Session lifecycle ended; ensuring full stop_session cleanup initiated from finally block.")
+                # This will ensure client is notified if WebSocket is still connected
+                asyncio.create_task(self.stop_session(notify_client=(self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED)))
 
 
     async def _send_audio_chunks(self, session):
@@ -121,21 +126,24 @@ class LiveSessionManager:
                 
                 audio_chunk = await self.audio_queue.get()
                 
-                if audio_chunk is None:
-                    logging.info("Stop signal received in audio sender. Ending sending task.")
+                if audio_chunk is None: # Sentinel for stopping
+                    logging.info("Stop signal (None) received in audio sender. Ending sending task.")
                     break
 
                 if not self.live_session_active:
-                    logging.warning("Session no longer active, stopping audio send.")
+                    logging.warning("Session no longer active in _send_audio_chunks, stopping audio send.")
                     break
                 
-                logging.debug(f"Sending audio chunk of size: {len(audio_chunk)} bytes.")
+                logging.debug(f"Sending audio chunk of size: {len(audio_chunk)} bytes to GenAI.")
                 try:
+                    # Ensure using the correct method if API changes; `input` dict is common for general data.
+                    # For pure audio stream with VAD, `realtime_input` might be used, but here we send chunks.
                     await session.send(input={"data": audio_chunk, "mime_type": "audio/pcm"})
                     self.audio_queue.task_done()
                 except Exception as e:
                     logging.error(f"Error sending audio chunk to GenAI: {e}", exc_info=True)
-                    break
+                    # If sending fails, we might want to break and let the session handler clean up.
+                    break 
         except asyncio.CancelledError:
             logging.info("Audio chunk sending task cancelled.")
         except Exception as e:
@@ -144,34 +152,59 @@ class LiveSessionManager:
             logging.info("Audio chunk sending task finished.")
 
 
-    async def _receive_genai_responses(self, session):
-        logging.info("GenAI response receiving task started.")
+    async def _receive_genai_data(self, session):
+        logging.info("GenAI data receiving task started (audio and transcript).")
         try:
             async for response in session.receive():
                 if not self.live_session_active:
-                    logging.warning("Session no longer active, stopping response processing.")
+                    logging.warning("Session no longer active in _receive_genai_data, stopping response processing.")
                     break
 
-                if response.text:
-                    logging.info(f"Transcript part received: '{response.text}'")
+                # Handle model's audio output data
+                if response.data:
+                    logging.debug(f"Received audio data chunk from GenAI: {len(response.data)} bytes.")
                     if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
-                        await self.websocket.send_json({"type": "transcript", "data": response.text})
+                        try:
+                            await self.websocket.send_bytes(response.data)
+                        except Exception as e:
+                            logging.error(f"Error sending audio data to client: {e}")
                 
-                # Removed the "if response.error:" block as LiveServerMessage for text/audio
-                # does not have a direct .error attribute. Stream-level errors are caught elsewhere.
-                # Specific non-fatal error signals would be in response.server_content or response.go_away.
-
+                # Handle transcription of model's audio output
+                if response.server_content and \
+                   hasattr(response.server_content, 'output_transcription') and \
+                   response.server_content.output_transcription and \
+                   response.server_content.output_transcription.text:
+                    transcript_text = response.server_content.output_transcription.text
+                    logging.info(f"Model output transcript received: '{transcript_text}'")
+                    if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
+                        await self.websocket.send_json({"type": "model_transcript", "data": "Gemini: " + transcript_text + "\n"})
+                
+                # Handle interim transcription of user's audio input
+                if response.server_content and \
+                   hasattr(response.server_content, 'interim_transcription') and \
+                   response.server_content.interim_transcription and \
+                   response.server_content.interim_transcription.text:
+                    interim_text = response.server_content.interim_transcription.text
+                    is_final_part = getattr(response.server_content.interim_transcription, 'is_final', False)
+                    logging.info(f"User interim transcript received: '{interim_text}' (is_final_part: {is_final_part})")
+                    if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
+                        await self.websocket.send_json({
+                            "type": "user_transcript", 
+                            "data": "You: " + interim_text + ("\n" if is_final_part else ""), # Add newline only if it's a final part of an utterance
+                            "is_final_part": is_final_part
+                        })
+                        
         except asyncio.CancelledError:
-            logging.info("GenAI response receiving task cancelled.")
+            logging.info("GenAI data receiving task cancelled.")
         except Exception as e:
-            logging.error(f"Error in GenAI response receiving: {e}", exc_info=True)
+            logging.error(f"Error in GenAI data receiving: {e}", exc_info=True)
             if self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
                 try:
                     await self.websocket.send_json({"type": "error", "message": f"GenAI stream processing error: {str(e)}"})
                 except Exception as ws_send_err:
                     logging.error(f"Error sending GenAI stream error to WebSocket: {ws_send_err}")
         finally:
-            logging.info("GenAI response receiving task finished.")
+            logging.info("GenAI data receiving task finished.")
 
 
     async def handle_audio_chunk(self, audio_chunk: bytes):
@@ -181,36 +214,41 @@ class LiveSessionManager:
                  await self.websocket.send_json({"status": "warning", "message": "Session not active. Cannot process audio."})
             return
         
-        logging.debug(f"Received audio chunk, putting in queue. Size: {len(audio_chunk)}. Queue size: {self.audio_queue.qsize()}")
+        logging.debug(f"Received audio chunk, putting in queue. Size: {len(audio_chunk)}. Queue size before put: {self.audio_queue.qsize()}")
         await self.audio_queue.put(audio_chunk)
 
     async def stop_session(self, notify_client=True):
         if not self.live_session_active:
-            logging.info("No active session to stop, or already stopping.")
+            logging.info("No active session to stop, or stop_session already in progress.")
+            # If already stopping, or no session, we might still want to ensure client is notified if requested and connected
             if notify_client and self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
-                pass
+                # Check if a "stopped" message hasn't been sent recently or if one is truly needed
+                pass # Decided to let the primary flow handle this to avoid duplicate messages.
             return
 
         logging.info("Stopping live session...")
-        self.live_session_active = False
+        self.live_session_active = False # Set this first to prevent new operations
 
+        # Signal the audio sender to stop by putting None in the queue
         if self.audio_queue:
             logging.debug("Putting None in audio queue to stop sender task.")
-            await self.audio_queue.put(None)
+            await self.audio_queue.put(None) # This will unblock `_send_audio_chunks` if it's waiting
 
+        # Cancel the main session handler task
         if self.session_handler_task and not self.session_handler_task.done():
             logging.debug("Cancelling session handler task.")
             self.session_handler_task.cancel()
             try:
-                await self.session_handler_task
+                await self.session_handler_task # Wait for it to actually cancel
                 logging.info("Session handler task cancelled and awaited successfully.")
             except asyncio.CancelledError:
                 logging.info("Session handler task confirmed cancellation during stop.")
             except Exception as e:
                 logging.error(f"Error awaiting cancelled session_handler_task: {e}", exc_info=True)
         
-        self.audio_queue = None
-        self.session_handler_task = None
+        # Clean up resources
+        self.audio_queue = None # Allow garbage collection
+        self.session_handler_task = None # Allow garbage collection
         
         if notify_client and self.websocket and self.websocket.client_state == self.websocket.client_state.CONNECTED:
             try:
@@ -220,6 +258,7 @@ class LiveSessionManager:
                 logging.error(f"Error sending stop confirmation to client: {e}", exc_info=True)
         
         logging.info("Live session stop process complete.")
+        # self.websocket reference is managed by the websocket_endpoint's finally block
 
 
 manager = LiveSessionManager()
@@ -229,18 +268,20 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logging.info(f"WebSocket connection accepted from {websocket.client.host}:{websocket.client.port}")
 
+    # Simple single-session management: if a websocket is already active, reject new one.
     if manager.websocket and manager.websocket.client_state == manager.websocket.client_state.CONNECTED:
-        logging.warning(f"New client connection attempt from {websocket.client.host} while another session is active/associated. Rejecting.")
+        logging.warning(f"New client connection attempt from {websocket.client.host} while another WebSocket is active. Rejecting.")
         await websocket.send_json({"status": "error", "message": "A session is already active or associated with another client."})
-        await websocket.close(code=1008)
+        await websocket.close(code=1008) # Policy Violation
         return
     
-    previous_websocket = manager.websocket
-    manager.websocket = websocket
+    # Store this new websocket as the active one for the manager
+    # This overwrites if manager.websocket was None or a disconnected socket.
+    manager.websocket = websocket 
 
     try:
         while True:
-            data = await websocket.receive()
+            data = await websocket.receive() # Blocks here until data is received
 
             if "text" in data:
                 message_text = data["text"]
@@ -251,10 +292,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     if command == "start_session":
                         logging.info("Received start_session command.")
-                        await manager.start_session(websocket)
+                        # Pass the current websocket to start_session
+                        await manager.start_session(websocket) 
                     elif command == "stop_session":
                         logging.info("Received stop_session command.")
-                        await manager.stop_session()
+                        await manager.stop_session() # Will use manager.websocket
                     else:
                         logging.warning(f"Unknown command: {command}")
                         await websocket.send_json({"status": "error", "message": f"Unknown command: {command}"})
@@ -271,22 +313,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect as e:
         logging.info(f"WebSocket disconnected by client: {websocket.client.host}:{websocket.client.port}. Code: {e.code}, Reason: {e.reason}")
-    except Exception as e:
-        logging.error(f"Error in WebSocket handler: {e}", exc_info=True)
+    except Exception as e: # Catch other exceptions during websocket handling
+        logging.error(f"Error in WebSocket handler for {websocket.client.host}:{websocket.client.port}: {e}", exc_info=True)
         if websocket.client_state == websocket.client_state.CONNECTED:
-            await websocket.send_json({"status": "error", "message": f"Server error: {str(e)}"})
+            try:
+                await websocket.send_json({"status": "error", "message": f"Server error: {str(e)}"})
+            except Exception as send_err:
+                logging.error(f"Failed to send error to disconnected/problematic websocket: {send_err}")
     finally:
         logging.info(f"Cleaning up WebSocket connection for {websocket.client.host}:{websocket.client.port}.")
+        # Critical: Only stop the session if THIS websocket was the one managing the active session.
         if manager.websocket == websocket:
             if manager.live_session_active:
-                logging.info("WebSocket disconnected, stopping active session associated with it.")
-                await manager.stop_session(notify_client=False)
-            manager.websocket = None
-            logging.info("Manager's websocket reference cleared.")
-        elif previous_websocket == websocket:
-             logging.info("Disconnected websocket was a previous websocket instance, manager.websocket already updated or cleared.")
+                logging.info("WebSocket disconnected, and it was the active session's WebSocket. Stopping GenAI session.")
+                # Pass notify_client=False because the client is already disconnected or disconnecting.
+                await manager.stop_session(notify_client=False) 
+            manager.websocket = None # Clear the manager's reference to this websocket
+            logging.info("Manager's websocket reference cleared as it was the one that disconnected.")
         else:
-            logging.info("Disconnected websocket was not the primary one known to the manager, or manager.websocket was already cleared.")
+            # This case might happen if a new websocket connected and replaced manager.websocket,
+            # and then the old one finally disconnected. Or if manager.websocket was already None.
+            logging.info(f"Disconnected websocket {websocket.client.host} was not the primary one known to the manager, or manager.websocket was already cleared/updated. No session stop initiated by this finally block.")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -301,4 +348,5 @@ async def get_root():
 if __name__ == "__main__":
     import uvicorn
     logging.info("Starting Uvicorn server directly for development.")
+    # For development, consider reload=True, but be mindful of state with WebSockets
     uvicorn.run(app, host="0.0.0.0", port=8000)

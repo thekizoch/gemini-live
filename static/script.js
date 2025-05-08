@@ -12,6 +12,13 @@ let microphoneSource;
 let audioProcessorNode;
 let userMediaStream;
 
+// MODIFICATION: Variables for playing audio received from the server
+let clientPlaybackAudioContext;
+let audioBufferQueue = [];
+let isPlayingModelAudio = false;
+let nextModelAudioStartTime = 0;
+const MODEL_AUDIO_SAMPLE_RATE = 24000; // Gemini Live API audio output is 24kHz
+
 function updateStatus(message, isError = false) {
     statusDiv.textContent = `Status: ${message}`;
     statusDiv.style.color = isError ? '#c0392b' : '#2c3e50'; // Red for error, dark blue for normal
@@ -23,7 +30,7 @@ function updateStatus(message, isError = false) {
 }
 
 function appendTranscript(text) {
-    transcriptDiv.innerHTML += text;
+    transcriptDiv.innerHTML += text; // Server now sends text with prefixes and newlines
     transcriptDiv.parentElement.scrollTop = transcriptDiv.parentElement.scrollHeight; // Auto-scroll container
     console.log("Transcript appended:", text);
 }
@@ -51,41 +58,32 @@ async function startAudioCapture() {
             sampleRate: AUDIO_SAMPLE_RATE
         });
         
-        // Check if the AudioContext sample rate matches the requested one.
-        // Some browsers might not honor it exactly, though it's more reliable now.
         if (audioContext.sampleRate !== AUDIO_SAMPLE_RATE) {
             updateStatus(`Warning: AudioContext running at ${audioContext.sampleRate}Hz, requested ${AUDIO_SAMPLE_RATE}Hz. This might affect quality or API compatibility.`, true);
-            // For robust solution, client-side resampling (e.g. using a library or custom AudioWorklet) would be needed.
-            // This example proceeds assuming the browser provides matching or close enough sample rate.
         }
 
         await audioContext.audioWorklet.addModule('/static/audio-processor.js');
         microphoneSource = audioContext.createMediaStreamSource(userMediaStream);
         audioProcessorNode = new AudioWorkletNode(audioContext, 'audio-processor-worklet', {
             processorOptions: {
-                bufferSize: 2048 // Send chunks of this many samples (e.g. 2048 samples / 16000 Hz = 128ms)
+                bufferSize: 2048 
             }
         });
 
         audioProcessorNode.port.onmessage = (event) => {
             if (socket && socket.readyState === WebSocket.OPEN && isSessionActive) {
                 const pcm16Data = event.data; // Int16Array
-                // Convert Int16Array to raw bytes (Uint8Array)
                 const buffer = new ArrayBuffer(pcm16Data.length * 2);
                 const view = new DataView(buffer);
                 for (let i = 0; i < pcm16Data.length; i++) {
-                    view.setInt16(i * 2, pcm16Data[i], true); // true for little-endian
+                    view.setInt16(i * 2, pcm16Data[i], true); 
                 }
                 socket.send(new Uint8Array(buffer));
             }
         };
 
         microphoneSource.connect(audioProcessorNode);
-        // It's often good practice to connect the worklet to the destination to keep it processing,
-        // even if you don't want to hear the audio.
-        // audioProcessorNode.connect(audioContext.destination); // Uncomment if playback/monitoring is desired (and handle feedback)
-        // For this use case (sending to backend), connecting to destination is not strictly needed
-        // as long as the stream is active and data flows to the worklet.
+        // audioProcessorNode.connect(audioContext.destination); // Uncomment for local monitoring (beware of feedback)
 
         updateStatus("Audio capture started. Sending data...");
         console.log("Audio capture successfully started.");
@@ -93,18 +91,18 @@ async function startAudioCapture() {
     } catch (err) {
         updateStatus(`Error starting audio capture: ${err.message}`, true);
         console.error("Audio capture error:", err);
-        throw err; // Re-throw to be caught by the caller
+        throw err; 
     }
 }
 
 function stopAudioCapture() {
-    console.log("Attempting to stop audio capture...");
+    console.log("Attempting to stop audio capture (user input)...");
     if (userMediaStream) {
         userMediaStream.getTracks().forEach(track => track.stop());
         userMediaStream = null;
     }
     if (audioProcessorNode) {
-        audioProcessorNode.port.postMessage('stop'); // Signal worklet if it needs cleanup
+        audioProcessorNode.port.postMessage('stop'); 
         audioProcessorNode.disconnect();
         audioProcessorNode = null;
     }
@@ -114,93 +112,187 @@ function stopAudioCapture() {
     }
     if (audioContext && audioContext.state !== 'closed') {
         audioContext.close().then(() => {
-            console.log("AudioContext closed.");
+            console.log("AudioContext (for user input) closed.");
             audioContext = null;
-        }).catch(err => console.error("Error closing AudioContext:", err));
+        }).catch(err => console.error("Error closing AudioContext (user input):", err));
     }
-    updateStatus("Audio capture stopped.");
-    console.log("Audio capture stopped.");
+    console.log("Audio capture (user input) stopped.");
+}
+
+function initClientPlaybackAudioContext() {
+    if (!clientPlaybackAudioContext || clientPlaybackAudioContext.state === 'closed') {
+        console.log("Initializing AudioContext for model playback at " + MODEL_AUDIO_SAMPLE_RATE + "Hz.");
+        clientPlaybackAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: MODEL_AUDIO_SAMPLE_RATE
+        });
+        nextModelAudioStartTime = 0;
+        audioBufferQueue = [];
+        isPlayingModelAudio = false;
+    }
+     if (clientPlaybackAudioContext.state === 'suspended') {
+        clientPlaybackAudioContext.resume().then(() => {
+            console.log("Resumed AudioContext for model playback.");
+        }).catch(e => console.error("Error resuming playback AudioContext", e));
+    }
+}
+
+function playNextChunkFromQueue() {
+    if (isPlayingModelAudio || audioBufferQueue.length === 0 || !clientPlaybackAudioContext || clientPlaybackAudioContext.state !== 'running') {
+        if (audioBufferQueue.length > 0 && (!clientPlaybackAudioContext || clientPlaybackAudioContext.state !== 'running')) {
+             console.warn("Playback: AudioContext not running or not initialized. Buffering audio.");
+        }
+        return;
+    }
+    isPlayingModelAudio = true;
+
+    const pcm16Data = audioBufferQueue.shift(); 
+    const float32Data = new Float32Array(pcm16Data.length);
+    for (let i = 0; i < pcm16Data.length; i++) {
+        float32Data[i] = pcm16Data[i] / 32768.0; 
+    }
+
+    const audioBuffer = clientPlaybackAudioContext.createBuffer(1, float32Data.length, MODEL_AUDIO_SAMPLE_RATE);
+    audioBuffer.copyToChannel(float32Data, 0);
+
+    const source = clientPlaybackAudioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(clientPlaybackAudioContext.destination);
+
+    const currentTime = clientPlaybackAudioContext.currentTime;
+    let startTime = nextModelAudioStartTime;
+    if (startTime < currentTime) {
+        startTime = currentTime;
+    }
+    
+    console.debug(`Scheduling audio playback: start at ${startTime}, duration ${audioBuffer.duration}`);
+    source.start(startTime);
+    nextModelAudioStartTime = startTime + audioBuffer.duration;
+
+    source.onended = () => {
+        console.debug("Audio chunk playback ended.");
+        isPlayingModelAudio = false;
+        playNextChunkFromQueue(); 
+    };
+}
+
+function stopClientPlayback() {
+    console.log("Stopping client audio playback for model response.");
+    audioBufferQueue = []; 
+    if (clientPlaybackAudioContext && clientPlaybackAudioContext.state !== 'closed') {
+        // Stop any playing sources by disconnecting and creating a new context later if needed.
+        // Or, more simply, just close it. The next init will create a new one.
+        clientPlaybackAudioContext.close().then(() => {
+            console.log("AudioContext for model playback closed.");
+        }).catch(e => console.error("Error closing playback AudioContext", e));
+        clientPlaybackAudioContext = null;
+    }
+    isPlayingModelAudio = false;
+    nextModelAudioStartTime = 0;
 }
 
 sessionButton.onclick = () => {
     if (!isSessionActive) {
         console.log("Start Session button clicked.");
-        // Start session
-        transcriptDiv.innerHTML = ""; // Clear previous transcript
+        transcriptDiv.innerHTML = "";
         updateStatus("Connecting to server...");
 
-        // Use wss:// if site is HTTPS, ws:// if HTTP
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
         socket = new WebSocket(`${wsProtocol}${window.location.host}/ws`);
+        socket.binaryType = "arraybuffer"; // Ensure binary data is ArrayBuffer
 
         socket.onopen = async () => {
-            updateStatus("Connection established. Starting session...");
-            console.log("WebSocket: Connection established. Sending start_session command.");
-            socket.send(JSON.stringify({ command: "start_session" }));
+            updateStatus("Connection established. Initializing audio and session...");
+            console.log("WebSocket: Connection established.");
+
+            try {
+                await startAudioCapture();
+                console.log("User audio capture initialized by client proactively.");
+                
+                socket.send(JSON.stringify({ command: "start_session" }));
+                console.log("Sent start_session command to server.");
+            } catch (err) {
+                updateStatus(`Audio capture failed: ${err.message}. Session cannot start.`, true);
+                console.error("Proactive audio capture failed:", err);
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.close();
+                }
+            }
         };
 
         socket.onmessage = (event) => {
-            console.log("WebSocket: Message received from server:", event.data);
-            try {
-                const message = JSON.parse(event.data);
-                console.debug("Parsed server message:", message); // More detailed log for parsed message
+            if (event.data instanceof ArrayBuffer) {
+                console.log("WebSocket: Received binary audio data from server:", event.data.byteLength + " bytes");
+                const pcm16Array = new Int16Array(event.data); 
+                audioBufferQueue.push(pcm16Array.slice()); 
 
-                if (message.type === "transcript") {
-                    appendTranscript(message.data);
+                if (!clientPlaybackAudioContext || clientPlaybackAudioContext.state === 'closed') {
+                    initClientPlaybackAudioContext();
+                } else if (clientPlaybackAudioContext.state === 'suspended') {
+                    clientPlaybackAudioContext.resume().catch(e => console.error("Error resuming playback context on data receive", e));
+                }
+                playNextChunkFromQueue();
+                return; // IMPORTANT: Return after handling binary data
+            }
+
+            // Handle text data (JSON messages)
+            let messageText = event.data;
+            if (typeof messageText !== 'string') {
+                console.error("Received non-string, non-ArrayBuffer message from server:", messageText);
+                updateStatus("Received unexpected data type from server.", true);
+                return;
+            }
+            console.log("WebSocket: Message received from server (text):", messageText);
+            try {
+                const message = JSON.parse(messageText);
+                console.debug("Parsed server message:", message);
+
+                if (message.type === "model_transcript") {
+                    appendTranscript(message.data); // Already prefixed by server
+                } else if (message.type === "user_transcript") {
+                    appendTranscript(message.data); // Already prefixed by server
+                } else if (message.type === "transcript") { // Legacy, if server ever sends it
+                    appendTranscript("Transcript (legacy): " + message.data + "\n");
                 } else if (message.status === "info") {
                     updateStatus(message.message);
                     if (message.message.includes("Live session started")) {
                         isSessionActive = true;
                         sessionButton.textContent = "Stop Session";
                         sessionButton.classList.add("recording");
-                        console.log("UI updated to recording state.");
-                        startAudioCapture().catch(err => {
-                            updateStatus(`Audio capture failed: ${err.message}. Stopping session.`, true);
-                            console.error("Audio capture failed after session start:", err.message);
-                            if (socket && socket.readyState === WebSocket.OPEN) {
-                                socket.send(JSON.stringify({ command: "stop_session" }));
-                                console.log("Sent stop_session command due to audio capture failure.");
-                            }
-                            // UI reset will be handled by stop_session message or onclose
-                        });
+                        initClientPlaybackAudioContext(); 
+                        console.log("UI updated to recording state. GenAI session active.");
                     } else if (message.message.includes("stopped")) {
-                        // This confirms session stop from backend
                         isSessionActive = false;
                         sessionButton.textContent = "Start Session";
                         sessionButton.classList.remove("recording");
-                        stopAudioCapture(); // Ensure audio capture is also stopped
-                        updateStatus("Session stopped."); // Final status
+                        stopAudioCapture(); 
+                        stopClientPlayback(); 
+                        updateStatus("Session stopped.");
                         console.log("Session stopped (confirmed by backend). UI reset.");
                     }
                 } else if (message.status === "error" || message.type === "error") {
                     updateStatus(`Error: ${message.message}`, true);
                     console.error("Error message from server:", message.message);
-                    // If a critical server error occurs, attempt to clean up UI
-                    if (isSessionActive) { // If we thought a session was active
+                    if (isSessionActive) { 
                         isSessionActive = false;
                         sessionButton.textContent = "Start Session";
                         sessionButton.classList.remove("recording");
                         stopAudioCapture();
+                        stopClientPlayback(); 
                         console.log("UI reset due to server error during active session.");
                     }
-                     if (socket && socket.readyState === WebSocket.OPEN && !message.message.includes("already active")) { // Don't close if it's "already active" error
-                        // socket.close(); // Or let server handle it
-                        console.log("Server error processed, socket remains open unless it was 'already active' error related to this client.");
-                    }
-                }  else if (message.status === "warning") {
+                } else if (message.status === "warning") {
                     updateStatus(`Warning: ${message.message}`, false);
                     console.warn("Warning message from server:", message.message);
                 }
             } catch (e) {
-                console.error("Error processing message from server:", e);
-                updateStatus("Received malformed message from server.", true);
+                console.error("Error processing text message from server:", e, "Raw data:", messageText);
+                updateStatus("Received malformed JSON message from server.", true);
             }
         };
 
         socket.onerror = (error) => {
             updateStatus(`WebSocket Error. Check console. Is the backend running?`, true);
             console.error("WebSocket Error: ", error);
-            // No need to change isSessionActive here, onclose will handle it
         };
 
         socket.onclose = (event) => {
@@ -209,33 +301,30 @@ sessionButton.onclick = () => {
             isSessionActive = false;
             sessionButton.textContent = "Start Session";
             sessionButton.classList.remove("recording");
-            stopAudioCapture(); // Ensure audio capture is stopped when connection closes
-            if (event.wasClean) {
-                console.log(`WebSocket closed cleanly, code=${event.code} reason=${event.reason}`);
-            } else {
-                console.warn('WebSocket connection died');
-            }
-            socket = null; // Clear socket variable
+            stopAudioCapture(); 
+            stopClientPlayback(); 
+            socket = null; 
             console.log("UI reset and socket cleared due to WebSocket close.");
         };
 
-    } else {
+    } else { // Stop session
         console.log("Stop Session button clicked.");
-        // Stop session
         updateStatus("Stopping session...");
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ command: "stop_session" }));
         } else {
-            // If socket is not open, manually reset UI as backend won't confirm
+            // If no active connection, just update UI and state locally
             isSessionActive = false;
             sessionButton.textContent = "Start Session";
             sessionButton.classList.remove("recording");
+            stopAudioCapture(); // Ensure local audio capture is stopped
+            stopClientPlayback(); // Ensure local playback is stopped
             updateStatus("Session stopped (no active connection).");
             console.log("Session stopped locally (no active connection). UI reset.");
         }
-        stopAudioCapture(); // Stop audio capture locally immediately
-        console.log("stopAudioCapture called locally.");
-        // isSessionActive and button text will be fully updated by server "stopped" message or onclose.
+        // stopAudioCapture and stopClientPlayback are also called here,
+        // redundantly if socket was open and server confirms, but safe.
+        // If socket wasn't open, this ensures cleanup.
     }
 };
 
@@ -246,8 +335,7 @@ window.onload = () => {
         updateStatus("AudioContext not supported by this browser. Live transcription will not work.", true);
         sessionButton.disabled = true;
         console.error("AudioContext not supported.");
-    }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    } else if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         updateStatus("MediaDevices API (getUserMedia) not supported by this browser. Live transcription will not work.", true);
         sessionButton.disabled = true;
         console.error("MediaDevices API (getUserMedia) not supported.");
