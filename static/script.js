@@ -33,7 +33,7 @@ function updateStatus(message, isError = false) {
     }
 }
 
-function appendTranscript(text, speaker, isFinalPart = true) {
+function appendTranscript(text, speaker, isFinalPart = false) {
     console.debug("Appending transcript:", { text, speaker, isFinalPart });
 
     if (speaker !== currentSpeaker) {
@@ -82,11 +82,12 @@ function appendTranscript(text, speaker, isFinalPart = true) {
         // If it's a final part of user's speech or any model speech,
         // reset currentSpeaker so the next message starts a new line.
         // Also, ensure the current span ends appropriately (e.g. if no natural newline came)
-        if (!currentSpeakerSpan.textContent.endsWith("\\n") && currentSpeakerSpan.textContent.trim() !== "") {
-            // transcriptDiv.appendChild(document.createElement('br')); // Let CSS handle line breaks between divs
+        if (speaker === 'user') { // Only reset for user if it's their final part
+            currentSpeaker = null; 
+            currentSpeakerSpan = null;
         }
-        currentSpeaker = null; 
-        currentSpeakerSpan = null;
+        // For speaker === 'model', we no longer reset currentSpeaker here based on isFinalPart alone.
+        // The model's line effectively ends when the user starts speaking or the session clears.
     }
     
     transcriptDiv.parentElement.scrollTop = transcriptDiv.parentElement.scrollHeight; // Auto-scroll container
