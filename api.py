@@ -29,7 +29,8 @@ if not GOOGLE_GENAI_API_KEY:
 app = FastAPI()
 
 # Mount static files (HTML, JS, CSS)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 class LiveSessionManager:
     def __init__(self):
@@ -39,7 +40,8 @@ class LiveSessionManager:
         self.websocket = None
         self.genai_client = genai.Client(api_key=GOOGLE_GENAI_API_KEY,
                                    http_options={"api_version": "v1beta"})
-        self.model_name = "models/gemini-2.0-flash-live-001"
+        # self.model_name = "models/gemini-2.0-flash-live-001"
+        self.model_name = "models/gemini-2.5-flash-preview-native-audio-dialog"
 
     async def start_session(self, websocket: WebSocket):
         if self.live_session_active:
