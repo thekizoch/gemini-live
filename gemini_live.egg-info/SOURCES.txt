@@ -1,7 +1,0 @@
-README.md
-pyproject.toml
-gemini_live.egg-info/PKG-INFO
-gemini_live.egg-info/SOURCES.txt
-gemini_live.egg-info/dependency_links.txt
-gemini_live.egg-info/requires.txt
-gemini_live.egg-info/top_level.txt

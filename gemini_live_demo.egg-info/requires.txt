@@ -1,9 +1,0 @@
-websockets
-sounddevice
-numpy
-python-dotenv
-fastapi
-uvicorn[standard]
-ruff>=0.11.8
-google-genai
-google-cloud-speech>=2.32.0
